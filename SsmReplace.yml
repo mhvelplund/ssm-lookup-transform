@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: An AWS::CloudFormation::Macro that replaces SSM placeholders with their values.
+Resources:
+  TransformExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:*'
+                  - 'ssm:GetParameter'
+                Resource: '*'
+  MacroFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        ZipFile: >
+          const aws = require('aws-sdk'); 
+          const ssm = new aws.SSM();
+
+          async function getSsmValue(Name) {
+              const result = await ssm.getParameter({ Name, WithDecryption: true }).promise();
+              return result.Parameter.Value;
+          }
+
+          async function applyToStrings(obj, fn) {
+              let p;
+              for (p in obj) {
+                  if (typeof obj[p] == 'string') {
+                      obj[p] = await fn(obj[p]);
+                  } else {
+                      obj[p] = await applyToStrings(obj[p], fn);
+                  }
+              }
+              return obj;
+          }
+
+          async function replaceKey(string, lookup) {
+              const keyPattern = /\{\{([^}]+)}}/g;
+              const matches = [];
+              let match,i;
+
+              while (match = keyPattern.exec(string)) {
+                  matches.push(match);
+              }
+
+              for (i in matches) {
+                  const [key, def] = matches[i][1].split(',');
+                  let replacement;
+
+                  try {
+                      replacement = await lookup(key);
+                  } catch (err) {
+                      if (!def) throw err;
+                  }
+
+                  if (!replacement && def) replacement = def;
+
+                  string = string.replace(matches[i][0], replacement);
+              }
+
+              return string;
+          }
+
+          const lookupAndReplace = async str => replaceKey(str, getSsmValue);
+
+          exports.handler = async function (event, context) {
+              //console.error('Event:',JSON.stringify(event));
+              let response = {
+                  requestId: event.requestId,
+                  status: 'success',
+              };
+
+              response.fragment = await applyToStrings(event.fragment, lookupAndReplace);
+              
+              return response;
+          };
+      Description: A Lambda function that replaces SSM placeholders with their values.
+      Handler: index.handler
+      Role: !GetAtt TransformExecutionRole.Arn
+      Runtime: nodejs8.10
+      Timeout: 1
+  Macromissions:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt MacroFunction.Arn
+      Principal: cloudformation.amazonaws.com
+  Macro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: SsmReplace
+      FunctionName: !GetAtt MacroFunction.Arn

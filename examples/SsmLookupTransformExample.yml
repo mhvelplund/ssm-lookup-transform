@@ -1,0 +1,15 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  Project:
+    Type: String
+
+Resources:
+  ArtifactBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName:
+        'Fn::Transform':
+          - Name: SsmLookup
+            Parameters:
+              Key: !Sub '/projects/${Project}'
+              Default: unknown-project # Optional parameter for when the SSM key isn't found
