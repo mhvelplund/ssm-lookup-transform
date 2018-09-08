@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: An AWS::CloudFormation::Transform that looks up the latest value of an SSM key.
+Resources:
+  TransformExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:*'
+                  - 'ssm:GetParameter'
+                Resource: '*'
+  TransformFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        ZipFile: >
+          const aws = require('aws-sdk');
+          const ssm = new aws.SSM();
+
+          async function getSsmValue(Name, defaultValue) {
+            try {
+              const result = await ssm.getParameter({
+                Name, WithDecryption: true
+              }).promise();
+              return result.Parameter.Value;
+            } catch (err) {
+              if (defaultValue) {
+                return defaultValue;
+              }
+              throw `Unable to load value from SSM key '${Name}'`;
+            }
+          }
+
+          exports.handler = async function(event, context) {
+              let response = {
+                  requestId: event.requestId,
+                  status: 'success'
+              };
+
+              try {
+                  response.fragment = await getSsmValue(event.params.Key, event.params.Default);
+              } catch (err) {
+                  console.error('SsmLookup transform failed', err);
+                  console.error('Event:',JSON.stringify(event));
+                  response.status = 'failure'
+                  response.errorMessage = err;
+              }
+
+              return response;
+          };
+      Description: A Lambda function that fetches SSM values.
+      Handler: index.handler
+      Role: !GetAtt TransformExecutionRole.Arn
+      Runtime: nodejs8.10
+      Timeout: 1
+  TransformFunctionPermissions:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt TransformFunction.Arn
+      Principal: cloudformation.amazonaws.com
+  Transform:
+    Type: 'AWS::CloudFormation::Transform'
+    Properties:
+      Name: !Sub '${AWS::AccountId}::SsmLookup'
+      Description: Provides access to SSM vars, both encrypted and non-encrypted, without explicit versioning.
+      RoutingTable:
+        '*': 1
+      Versions:
+        - VersionName: 1
+          Description: Version 1_0 of the SsmLookup transform
+          FunctionName: !GetAtt TransformFunction.Arn
+      ExecutionPolicy:
+        Version: 2012-10-17
+        Id: AllowOtherAccountPolicy
+        Statement:
+          - Sid: AllowExecution
+            Effect: Allow
+            Principal:
+              AWS: !Sub '${AWS::AccountId}'
+            Action: 'cloudformation:CreateChangeSet'
+            Resource: !Sub "arn:*:cloudformation:${AWS::Region}:${AWS::AccountId}:transform/SsmLookup"
